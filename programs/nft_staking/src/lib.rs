@@ -4,6 +4,8 @@ declare_id!("GMTKAcYEXAqnokiLhmc8S1kiRgmCSFptYkUjZwEzwUmF");
 
 #[program]
 pub mod nft_staking {
+    use std::thread::current;
+
     use anchor_lang::{prelude::sysvar::rewards, system_program::Transfer};
 
     use super::*;
@@ -39,6 +41,7 @@ pub mod nft_staking {
 
         Ok(())
     }
+
 
     pub fn unstake(ctx:CpiContext<Unstake>)->Result<()>{
         let stake_entry = &ctx.accounts.stake_entry;
@@ -82,30 +85,62 @@ pub mod nft_staking {
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
 
-        token::transfer(cpi_ctx, 1)?; // Transfer 1 NFT back
-
-        // --- 3. Close the accounts ---
-        // `nft_vault` and `stake_entry` are closed via `close = user`.
-        
+        token::transfer(cpi_ctx, 1)?; 
         msg!("NFT unstaked. All accounts closed.");
 
-        Ok(())
+        Ok(());
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
 
-        token::transfer(cpi_ctx, 1)?; // Transfer 1 NFT back
-
-        // --- 3. Close the accounts ---
-        // `nft_vault` and `stake_entry` are closed via `close = user`.
+        token::transfer(cpi_ctx, 1)?;
         
         msg!("NFT unstaked. All accounts closed.");
 
         Ok(())
 
-
-
-
     }
+
+    pub fn claim_reward(ctx:Context<ClaimReward>)-> Result<()>{
+        let clock = Clock::get()?;
+        let current_time = clock.unix_timestamp;
+        let stake_entry = &mut ctx.accounts.stake_entry;
+        let stake_pool = &ctx.accounts.stake_pool;
+
+        let time_elapsed = current_time.checked_sub(stake_entry.last_claim_time).unwrap();
+        let rewards_to_pay = (stake_pool.reward_rate as u128)
+            .checked_mul(time_elapsed as u128)
+            .unwrap();
+
+        let rewards_as_u64 = rewards_to_pay as u64;
+
+        if rewards_as_u64 == 0 {
+            msg!("No rewards to claim.");
+            return Ok(());
+        }
+
+
+        let pool_seeds = &[
+            b"stake_pool",
+            &[ctx.bumps.stake_pool]
+        ];
+        let signer_seeds = &[&pool_seeds[..]];
+        
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.reward_vault.to_account_info(),
+            to: ctx.accounts.user_reward_account.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+
+        token::transfer(cpi_ctx, rewards_as_u64)?;
+        stake_entry.last_claim_time = current_time;
+
+        msg!("Rewards claimed. New last claim time: {}", current_time);
+
+        Ok(())
+    }
+
+
 
 }
 
