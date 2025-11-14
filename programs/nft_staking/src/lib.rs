@@ -1,16 +1,15 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{self , Mint, Token,TokenaAccount,Transfer};
 
 declare_id!("GMTKAcYEXAqnokiLhmc8S1kiRgmCSFptYkUjZwEzwUmF");
 
 #[program]
 pub mod nft_staking {
+    use core::time;
     use std::thread::current;
-
-    use anchor_lang::{prelude::sysvar::rewards, system_program::Transfer};
-
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>,reward_rate:u64) -> Result<()> {
         let pool = &mut ctx.accounts.stake_pool;
         pool.authority = *ctx.accounts.authority.key;
         pool.reward_mint = ctx.accounts.reward_mint.key();
@@ -22,16 +21,19 @@ pub mod nft_staking {
     }
 
     pub fn stake(ctx:Context<StakeNft>)-> Result<()>{
-        let clcok = Clock::get()?;
+        let clock = Clock::get()?;
         let entry = &mut ctx.accounts.stake_entry;
+
+        entry.staker = *ctx.accounts.user.key;
         entry.nft_mint = ctx.accounts.nft_mint.key();
-        entry.stake_time = clock.unix_timestamp();
-        entry.last_claim_time = clock.unix_timestamp();
+        entry.stake_time = clock.unix_timestamp;
+        entry.last_claim_time = clock.unix_timestamp;
         entry.is_staked = true;
 
-        let cpi_accounts = Transfer{
+        let cpi_accounts = token::Transfer{
             from:ctx.accounts.user_nft_token_account.to_account_info(),
             to:ctx.accounts.nft_vault.to_account_info(),
+            authority:ctx.accounts.user.to_account_info(),
         };
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new(
@@ -47,9 +49,12 @@ pub mod nft_staking {
         let stake_entry = &ctx.accounts.stake_entry;
         let clock = Clock::get()?;
         let time_elapsed = clock.unix_timestamp.checked_sub(stake_entry.last_claim_time).unwrap();
+        let stake_pool = &ctx.accounts.stake_pool;
         const MAX_UNCLAMED_TIME: i64 = 5;
+
+
         if time_elapsed > MAX_UNCLAMED_TIME{
-            let rewards_pending = (ctx.accounts.stake_entry.reward_rate as u128)
+            let rewards_pending = (stake_pool.reward_rate as u128)
                 .checked_mul(time_elapsed as u128)
                 .unwrap();
             if rewards_pending > 0{
@@ -57,43 +62,23 @@ pub mod nft_staking {
             }
         }
         let vault_seeds = &[
-            b"vault",
-            &stake_entry.nft_mint.to_bytes(),
-            &stake_entry.staker.to_bytes(),
-            &[ctx.bumps.nft_vault]
+            b"vault".as_ref(),
+            &stake_entry.nft_mint.to_bytes().as_ref(),
+            &stake_entry.staker.to_bytes().as_ref(),
+            &[ctx.bumps.nft_vault],
         ];
         let signer_seeds = &[&vault_seeds[..]];
 
         let cpi_accounts = Transfer {
             from: ctx.accounts.nft_vault.to_account_info(),
             to: ctx.accounts.user_nft_account.to_account_info(),
+            authority:ctx.accounts.nft_vault.to_account_info(),
         };
-        let vault_seeds = &[
-            b"vault",
-            &stake_entry.nft_mint.to_bytes(),
-            &stake_entry.staker.to_bytes(),
-            &[ctx.bumps.nft_vault]
-        ];
-        let signer_seeds = &[&vault_seeds[..]];
 
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.nft_vault.to_account_info(),
-            to: ctx.accounts.user_nft_account.to_account_info(),
-           
-        };
-        let  authority=  ctx.accounts.nft_vault.to_account_info();
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
 
         token::transfer(cpi_ctx, 1)?; 
-        msg!("NFT unstaked. All accounts closed.");
-
-        Ok(());
-        let cpi_program = ctx.accounts.token_program.to_account_info();
-        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-
-        token::transfer(cpi_ctx, 1)?;
-        
         msg!("NFT unstaked. All accounts closed.");
 
         Ok(())
@@ -107,6 +92,12 @@ pub mod nft_staking {
         let stake_pool = &ctx.accounts.stake_pool;
 
         let time_elapsed = current_time.checked_sub(stake_entry.last_claim_time).unwrap();
+
+        if time_elapsed <= 0{
+            msg!("No time elaspsed");
+            return Ok(());
+        }
+
         let rewards_to_pay = (stake_pool.reward_rate as u128)
             .checked_mul(time_elapsed as u128)
             .unwrap();
@@ -120,7 +111,7 @@ pub mod nft_staking {
 
 
         let pool_seeds = &[
-            b"stake_pool",
+            b"stake_pool".as_ref(),
             &[ctx.bumps.stake_pool]
         ];
         let signer_seeds = &[&pool_seeds[..]];
@@ -128,6 +119,8 @@ pub mod nft_staking {
         let cpi_accounts = Transfer {
             from: ctx.accounts.reward_vault.to_account_info(),
             to: ctx.accounts.user_reward_account.to_account_info(),
+            authority:ctx.accounts.stake_pool.to_acccount_info(),
+
         };
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
@@ -140,12 +133,7 @@ pub mod nft_staking {
         Ok(())
     }
 
-
-
 }
-
-
-
 
 
 #[derive(Accounts)]
@@ -154,12 +142,14 @@ pub struct Initialize<'info>{
     // what is this pda is for 
     #[account(
         init, 
-        payer = admin,
+        payer = authority,
         space = 8 + 32 + 32 + 8 + 1,// this is the staking account of the user
-        seeds = [b"config"],
+        seeds = [b"stake_pool"],
         bump
     )]
     pub stake_pool: Account<'info,StakePool>,
+
+    #[account(mu)]
     pub authority:Signer<'info >,
     pub reward_mint:Account<'info, Mint>,
 
@@ -167,11 +157,11 @@ pub struct Initialize<'info>{
         init,
         payer = authority,
         token::mint = reward_mint,
-        token::authority =authority,// this is the reward token of the user
-        seeds = [b"reward_mint"],
+        token::authority =stake_pool,// this is the reward token of the user
+        seeds = [b"reward_vault"],
         bump
     )]
-    pub reward_vault: Account<'info , TokenaAccount>,
+    pub reward_vault: Account<'info , TokenAccount>,
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
@@ -186,8 +176,8 @@ pub struct StakeNft<'info> {
     #[account(
         mut ,
         constraint = user_nft_account.mint == nft_mint.key(),
-        constraint = user_nft_account.owner = user.key(),
-        ccontraint = user_nft_account.account.amount == 1
+        constraint = user_nft_account.owner == user.key(),
+        constraint = user_nft_account.account.amount == 1
         
     )]
     pub user_nft_account :Account<'info , TokenAccount>,
@@ -211,6 +201,7 @@ pub struct StakeNft<'info> {
         bump
     )]
     pub nft_vault: Account<'info, TokenAccount>,
+
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
     pub rent: Sysvar<'info, Rent>,
@@ -218,19 +209,21 @@ pub struct StakeNft<'info> {
 
 #[derive(account)]
 pub struct Unstake<'info>{
-    #[accounnt(mut)]
+    #[account(mut)]
     pub user:Signer<'info>,
 
     #[account(
         mut,
-        token::mint = nft_mint.key()
+        constraint = user_nft_account.owner == user.key(),
+        constraint = user_nft_account.mint == nft_mint.key()
     )]
     pub user_nft_account : Account<'info , TokenAccount>,
+
     pub nft_mint: Account<'info , Mint>,
     #[account(
         mut,
         close = user,
-        seeds = b["stake_entry", nft_mint.key().as_ref, user.key().as_ref()],
+        seeds = [b"stake_entry", nft_mint.key().as_ref, user.key().as_ref()],
         bump,
         constraint = stake_entry.staker == user.key()
     )]
@@ -238,20 +231,32 @@ pub struct Unstake<'info>{
     #[account(
         mut,
         close = user,
-        seeds = [b"stake_entry",nft_mint.key().as_ref(), user.key().as_ref()]
+        seeds = [b"vault",nft_mint.key().as_ref(), user.key().as_ref()],
+        bump
     )]
     pub nft_vault : Account<'info , TokenAccount>,
+
+    #[account(
+        seeds = [b"stake_pool"],
+        bump
+    )]
+    pub stake_pool:Account<'info,StakePool>,
+
     pub token_program : Program<'info, Token>,
+    pub system_program : Program<'info, System>,
 
 }
 
 #[derive(account)]
 pub struct ClaimReward<'info>{
-    #[acccount]
+    #[account(mut)]
     pub user :Signer<'info>,
+    
+    pub nft_mint : Account<'info , Mint>,
+
     #[account(
         mut,
-        constraint = stale_entry.owner = user.key(),
+        constraint = stale_entry.staker == user.key(),
         seeds = [b"stake_entry", nft_mint.key().as_ref(), user.key().as_ref()],
         bump
     )]
@@ -267,9 +272,10 @@ pub struct ClaimReward<'info>{
         mut, 
         seeds = [b"reward_vault"],
         bump,
-        constraint = rewars_vault.key() == stake_pool.reward_vault
+        constraint = reward_vault.key() == stake_pool.reward_vault
     )]
     pub reward_vault : Account<'info, TokenAccount>,
+
     #[account(
         mut,
         constraint = user_reward_account.owner == user.key(),
@@ -279,9 +285,7 @@ pub struct ClaimReward<'info>{
 
     pub token_program: Program<'info, Token>,
 
-
 }
-
 
 #[account]
 #[derive(Default)]
@@ -306,4 +310,6 @@ pub struct StakeEntry {
 pub enum ErrorCode {
     #[msg("Arithmetic overflow.")]
     Overflow,
+    #[msg("Please claim your rewards before unstaking.")]
+    UnclaimedRewards,
 }
